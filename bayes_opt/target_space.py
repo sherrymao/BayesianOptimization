@@ -22,16 +22,22 @@ class TargetSpace(object):
     >>> y = space.register_point(x)
     >>> assert self.max_point()['max_val'] == y
     """
-    def __init__(self, target_func, pbounds, random_state=None):
+    def __init__(self, target_func, pbounds, random_state=None, constraints=dict(), infeasible_penalty=1e5):
         """
         Parameters
         ----------
         target_func : function
             Function to be maximized.
 
+        constraints : Dict(constraint_name, List(function))
+            Functions to be constrained to be less or equal to 0
+
         pbounds : dict
             Dictionary with parameters names as keys and a tuple with minimum
             and maximum values.
+
+        infeasible_penalty : float
+            when param is infeasible, the surrogate value for the optimization target.
 
         random_state : int, RandomState, or None
             optionally specify a seed for a random number generator
@@ -40,6 +46,8 @@ class TargetSpace(object):
 
         # The function to be optimized
         self.target_func = target_func
+        self._constriant_keys = sorted(constraints)
+        self._constraints_func = [item[1] for item in sorted(constraints.items(), key=lambda x: x[0])]
 
         # Get the name of the parameters
         self._keys = sorted(pbounds)
@@ -52,6 +60,9 @@ class TargetSpace(object):
         # preallocated memory for X and Y points
         self._params = np.empty(shape=(0, self.dim))
         self._target = np.empty(shape=(0))
+        self._constraints = np.empty(shape=(0, self.constraint_dim))
+        self._unconstrained_target = np.empty(shape=(0))
+        self._infeasible_penalty = infeasible_penalty
 
         # keep track of unique points we have seen so far
         self._cache = {}
@@ -72,12 +83,24 @@ class TargetSpace(object):
         return self._params
 
     @property
+    def constriants(self):
+        return self._constraints
+
+    @property
     def target(self):
         return self._target
 
     @property
+    def unconstrained_target(self):
+        return self._unconstrained_target
+
+    @property
     def dim(self):
         return len(self._keys)
+
+    @property
+    def constraint_dim(self):
+        return len(self._constriant_keys)
 
     @property
     def keys(self):
@@ -107,6 +130,19 @@ class TargetSpace(object):
             )
         return dict(zip(self.keys, x))
 
+    def array_to_constraints(self, x):
+        try:
+            assert len(x[0]) == len(self._constriant_keys)
+        except AssertionError:
+            raise ValueError(
+                "Size of array ({}) is different than the ".format(len(x)) +
+                "expected number of parameters ({}).".format(len(self._constriant_keys))
+            )
+        # print("x: {}".format(x))
+        # print("constriant_keys: {}".format(self._constriant_keys))
+        # print(dict(zip(self._constriant_keys, x.T)))
+        return dict(zip(self._constriant_keys, x.T))
+
     def _as_array(self, x):
         try:
             x = np.asarray(x, dtype=float)
@@ -123,7 +159,7 @@ class TargetSpace(object):
             )
         return x
 
-    def register(self, params, target):
+    def register(self, params, target, constraints=dict()):
         """
         Append a point and its target value to the known data.
 
@@ -157,14 +193,34 @@ class TargetSpace(object):
         1
         """
         x = self._as_array(params)
-        if x in self:
-            raise KeyError('Data point {} is not unique'.format(x))
+        if len(constraints) == 0:
+            if x in self:
+                raise KeyError('Data point {} is not unique'.format(x))
 
-        # Insert data into unique dictionary
-        self._cache[_hashable(x.ravel())] = target
+            # Insert data into unique dictionary
+            self._cache[_hashable(x.ravel())] = [target]
+            self._params = np.concatenate([self._params, x.reshape(1, -1)])
+            self._unconstrained_target = np.concatenate([self._unconstrained_target, [target]])
+            self._target = np.concatenate([self._target, [target]])
+            return
+        else:
+            # constraints = self._as_array(constraints)
+            constraints = np.asarray([constraints[key] for key in self._constriant_keys])
+            if x in self:
+                raise KeyError('Data point {} is not unique'.format(x))
 
-        self._params = np.concatenate([self._params, x.reshape(1, -1)])
-        self._target = np.concatenate([self._target, [target]])
+            # Insert data into unique dictionary
+            self._cache[_hashable(x.ravel())] = [target, constraints]
+
+            self._params = np.concatenate([self._params, x.reshape(1, -1)])
+            self._constraints = np.concatenate([self._constraints, constraints.reshape(1, -1)])
+            self._unconstrained_target = np.concatenate([self._unconstrained_target, [target]])
+            if self.constraint_dim == 0:
+                pass
+            else:
+                target = target if np.max(constraints)<=0 else -self._infeasible_penalty
+            self._target = np.concatenate([self._target, [target]])
+            return target
 
     def probe(self, params):
         """
@@ -192,7 +248,8 @@ class TargetSpace(object):
         except KeyError:
             params = dict(zip(self._keys, x))
             target = self.target_func(**params)
-            self.register(x, target)
+            constraints = dict(zip(self._constriant_keys, [c(**params) for c in self._constraints_func]))
+            target = self.register(x, target, constraints)
         return target
 
     def random_sample(self):

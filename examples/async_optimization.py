@@ -30,12 +30,19 @@ def black_box_function(x, y):
     time.sleep(random.randint(1, 7))
     return -x ** 2 - (y - 1) ** 2 + 1
 
+def constraint_1(p1, p2):
+    return p1-5
+
+def constraint_2(p1, p2):
+    return p2-5
+
 
 class BayesianOptimizationHandler(RequestHandler):
     """Basic functionality for NLP handlers."""
     _bo = BayesianOptimization(
         f=black_box_function,
-        pbounds={"x": (-4, 4), "y": (-3, 3)}
+        pbounds={"x": (-4, 4), "y": (-3, 3)},
+        cs={"c1": constraint_1, "c2": constraint_2}
     )
     _uf = UtilityFunction(kind="ucb", kappa=3, xi=1)
 
@@ -47,6 +54,7 @@ class BayesianOptimizationHandler(RequestHandler):
             self._bo.register(
                 params=body["params"],
                 target=body["target"],
+                constraints=body["constraints"]
             )
             print("BO has registered: {} points.".format(len(self._bo.space)), end="\n\n")
         except KeyError:

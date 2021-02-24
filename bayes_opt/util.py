@@ -2,9 +2,10 @@ import warnings
 import numpy as np
 from scipy.stats import norm
 from scipy.optimize import minimize
+import matplotlib.pyplot as plt
+import matplotlib.cm as cm
 
-
-def acq_max(ac, gp, y_max, bounds, random_state, n_warmup=10000, n_iter=10):
+def acq_max(ac, gp, y_max, bounds, random_state, n_warmup=10000, n_iter=10, constraint_gps=dict(), infeasible_penalty=1e5):
     """
     A function to find the maximum of the acquisition function
 
@@ -35,6 +36,12 @@ def acq_max(ac, gp, y_max, bounds, random_state, n_warmup=10000, n_iter=10):
     :param n_iter:
         number of times to run scipy.minimize
 
+    :param constraint_gps:
+        gp models for the constraints
+
+    :param infeasible_penalty:
+        when param is infeasible, the surrogate value for the optimization target.
+
     Returns
     -------
     :return: x_max, The arg max of the acquisition function.
@@ -43,19 +50,31 @@ def acq_max(ac, gp, y_max, bounds, random_state, n_warmup=10000, n_iter=10):
     # Warm up with random points
     x_tries = random_state.uniform(bounds[:, 0], bounds[:, 1],
                                    size=(n_warmup, bounds.shape[0]))
-    ys = ac(x_tries, gp=gp, y_max=y_max)
+    if len(constraint_gps) == 0:
+        ys = ac(x_tries, gp=gp, y_max=y_max)
+    else:
+        ys = ac(x_tries, gp=gp, y_max=y_max, constraint_gps=constraint_gps, infeasible_penalty=infeasible_penalty)
     x_max = x_tries[ys.argmax()]
     max_acq = ys.max()
+    print("x_max: {}, with arguments: {}".format(x_max, max_acq))
 
     # Explore the parameter space more throughly
     x_seeds = random_state.uniform(bounds[:, 0], bounds[:, 1],
                                    size=(n_iter, bounds.shape[0]))
+    i_ter = 0
     for x_try in x_seeds:
+        i_ter += 1
         # Find the minimum of minus the acquisition function
-        res = minimize(lambda x: -ac(x.reshape(1, -1), gp=gp, y_max=y_max),
-                       x_try.reshape(1, -1),
-                       bounds=bounds,
-                       method="L-BFGS-B")
+        if len(constraint_gps) == 0:
+            res = minimize(lambda x: -ac(x.reshape(1, -1), gp=gp, y_max=y_max),
+                           x_try.reshape(1, -1),
+                           bounds=bounds,
+                           method="L-BFGS-B")
+        else:
+            res = minimize(lambda x: -ac(x.reshape(1, -1), gp=gp, y_max=y_max, constraint_gps=constraint_gps, infeasible_penalty=infeasible_penalty),
+                           x_try.reshape(1, -1),
+                           bounds=bounds,
+                           method="L-BFGS-B")
 
         # See if success
         if not res.success:
@@ -65,6 +84,7 @@ def acq_max(ac, gp, y_max, bounds, random_state, n_warmup=10000, n_iter=10):
         if max_acq is None or -res.fun[0] >= max_acq:
             x_max = res.x
             max_acq = -res.fun[0]
+            print("i_iter: {}, x_max: {}, with arguments: {}".format(i_ter, x_max, max_acq))
 
     # Clip output to make sure it lies within the bounds. Due to floating
     # point technicalities this is not always the case.
@@ -86,7 +106,7 @@ class UtilityFunction(object):
         
         self._iters_counter = 0
 
-        if kind not in ['ucb', 'ei', 'poi']:
+        if kind not in ['ucb', 'ei', 'poi', 'constraint_ei']:
             err = "The utility function " \
                   "{} has not been implemented, " \
                   "please choose one of ucb, ei, or poi.".format(kind)
@@ -100,13 +120,26 @@ class UtilityFunction(object):
         if self._kappa_decay < 1 and self._iters_counter > self._kappa_decay_delay:
             self.kappa *= self._kappa_decay
 
-    def utility(self, x, gp, y_max):
+    def utility(self, x, gp, y_max, constraint_gps=dict(), infeasible_penalty=1e5):
         if self.kind == 'ucb':
             return self._ucb(x, gp, self.kappa)
         if self.kind == 'ei':
             return self._ei(x, gp, y_max, self.xi)
         if self.kind == 'poi':
             return self._poi(x, gp, y_max, self.xi)
+        if self.kind == 'constraint_ei':
+            # print("======for debugging only=======")
+            # testrange = np.dstack(
+            #     np.meshgrid(np.arange(0, 10, 0.05), np.arange(0, 10, 0.05))
+            # ).reshape(-1, 2)
+            # print(testrange)
+            # y = self._constraint_ei(testrange, gp, y_max, self.xi, constraint_gps, infeasible_penalty)
+            #
+            # fig, ax = plt.subplots(subplot_kw={"projection": "3d"})
+            # ax.plot_surface(testrange[:,0].reshape(200, 200), testrange[:,1].reshape(200, 200), y.reshape(200, 200), cmap=cm.coolwarm,
+            #                        linewidth=0, antialiased=False)
+            # plt.show()
+            return self._constraint_ei(x, gp, y_max, self.xi, constraint_gps, infeasible_penalty)
 
     @staticmethod
     def _ucb(x, gp, kappa):
@@ -125,6 +158,25 @@ class UtilityFunction(object):
         a = (mean - y_max - xi)
         z = a / std
         return a * norm.cdf(z) + std * norm.pdf(z)
+
+    @staticmethod
+    def _constraint_ei(x, gp, y_max, xi, constraint_gps, infeasible_penalty):
+        constraints_prob_correct = 1.0
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            mean, std = gp.predict(x, return_std=True)
+            for k in constraint_gps.keys():
+                meanc, stdc = constraint_gps[k].predict(x, return_std=True)
+                constraints_prob_correct *= norm.cdf(-meanc/stdc)
+
+        if y_max == -infeasible_penalty:
+            print("hit")
+            return (infeasible_penalty - mean) * constraints_prob_correct
+        else:
+            a = (mean - y_max - xi)
+            z = a / std
+            unconstrained_ei = a * norm.cdf(z) + std * norm.pdf(z)
+            return unconstrained_ei * constraints_prob_correct
 
     @staticmethod
     def _poi(x, gp, y_max, xi):
@@ -154,13 +206,23 @@ def load_logs(optimizer, logs):
                     break
 
                 iteration = json.loads(iteration)
-                try:
-                    optimizer.register(
-                        params=iteration["params"],
-                        target=iteration["target"],
-                    )
-                except KeyError:
-                    pass
+                if "constraints" in iteration.keys():
+                    try:
+                        optimizer.register(
+                            params=iteration["params"],
+                            target=iteration["target"],
+                            constraints=iteration["constraints"]
+                        )
+                    except KeyError:
+                        pass
+                else:
+                    try:
+                        optimizer.register(
+                            params=iteration["params"],
+                            target=iteration["target"]
+                        )
+                    except KeyError:
+                        pass
 
     return optimizer
 

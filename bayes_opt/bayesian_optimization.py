@@ -7,7 +7,7 @@ from .util import UtilityFunction, acq_max, ensure_rng
 
 from sklearn.gaussian_process.kernels import Matern
 from sklearn.gaussian_process import GaussianProcessRegressor
-
+import numpy as np
 
 class Queue:
     def __init__(self):
@@ -77,6 +77,9 @@ class BayesianOptimization(Observable):
         Dictionary with parameters names as keys and a tuple with minimum
         and maximum values.
 
+    cs: List(function)
+        Functions to be constrained to be less or equal to 0
+
     random_state: int or numpy.random.RandomState, optional(default=None)
         If the value is an integer, it is used as the seed for creating a
         numpy.random.RandomState. Otherwise the random state provieded it is used.
@@ -101,17 +104,18 @@ class BayesianOptimization(Observable):
     set_bounds()
         Allows changing the lower and upper searching bounds
     """
-    def __init__(self, f, pbounds, random_state=None, verbose=2,
+    def __init__(self, f, pbounds, cs=dict(), infeasible_penalty=1e5, random_state=None, verbose=2,
                  bounds_transformer=None):
         self._random_state = ensure_rng(random_state)
 
         # Data structure containing the function to be optimized, the bounds of
         # its domain, and a record of the evaluations we have done so far
-        self._space = TargetSpace(f, pbounds, random_state)
-
+        self._space = TargetSpace(f, pbounds, infeasible_penalty=infeasible_penalty, constraints=cs,
+                                  random_state=random_state)
         self._queue = Queue()
 
         # Internal GP regressor
+        self._infeasible_penalty = infeasible_penalty
         self._gp = GaussianProcessRegressor(
             kernel=Matern(nu=2.5),
             alpha=1e-6,
@@ -119,6 +123,17 @@ class BayesianOptimization(Observable):
             n_restarts_optimizer=5,
             random_state=self._random_state,
         )
+
+        self._constraints_gp = dict()
+        if len(cs) > 0:
+            for k in cs.keys():
+                self._constraints_gp[k] = GaussianProcessRegressor(
+                    kernel=Matern(nu=2.5),
+                    alpha=1e-6,
+                    normalize_y=True,
+                    n_restarts_optimizer=5,
+                    random_state=self._random_state,
+                )
 
         self._verbose = verbose
         self._bounds_transformer = bounds_transformer
@@ -143,9 +158,9 @@ class BayesianOptimization(Observable):
     def res(self):
         return self._space.res()
 
-    def register(self, params, target):
+    def register(self, params, target, constraints=dict()):
         """Expect observation with known target"""
-        self._space.register(params, target)
+        self._space.register(params, target, constraints=constraints)
         self.dispatch(Events.OPTIMIZATION_STEP)
 
     def probe(self, params, lazy=True):
@@ -176,7 +191,11 @@ class BayesianOptimization(Observable):
         # we don't really need to see them here.
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            self._gp.fit(self._space.params, self._space.target)
+            # print(self._space.params)
+            # print(self._space.unconstrained_target)
+            self._gp.fit(self._space.params, self._space.unconstrained_target)
+            for k in self._constraints_gp.keys():
+                self._constraints_gp[k].fit(self._space.params, self._space.array_to_constraints(self._space.constriants)[k])
 
         # Finding argmax of the acquisition function.
         suggestion = acq_max(
@@ -184,7 +203,9 @@ class BayesianOptimization(Observable):
             gp=self._gp,
             y_max=self._space.target.max(),
             bounds=self._space.bounds,
-            random_state=self._random_state
+            random_state=self._random_state,
+            constraint_gps = self._constraints_gp,
+            infeasible_penalty = self._infeasible_penalty
         )
 
         return self._space.array_to_params(suggestion)

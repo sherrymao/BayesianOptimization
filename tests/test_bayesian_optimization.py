@@ -10,30 +10,36 @@ def target_func(**kwargs):
     # arbitrary target func
     return sum(kwargs.values())
 
+def constraint_1(**kwargs):
+    return kwargs['p1']-5
+
+def constraint_2(**kwargs):
+    return kwargs['p2']-5
+
 
 PBOUNDS = {'p1': (0, 10), 'p2': (0, 10)}
 
 
 def test_register():
-    optimizer = BayesianOptimization(target_func, PBOUNDS, random_state=1)
+    optimizer = BayesianOptimization(target_func, PBOUNDS, cs={"c1": constraint_1, "c2": constraint_2}, random_state=1)
     assert len(optimizer.space) == 0
 
-    optimizer.register(params={"p1": 1, "p2": 2}, target=3)
+    optimizer.register(params={"p1": 1, "p2": 2}, target=3, constraints={"c1": -4, "c2": -3})
     assert len(optimizer.res) == 1
     assert len(optimizer.space) == 1
 
-    optimizer.space.register(params={"p1": 5, "p2": 4}, target=9)
+    optimizer.space.register(params={"p1": 6, "p2": 4}, target=10, constraints={"c1": 1, "c2": -1})
     assert len(optimizer.res) == 2
     assert len(optimizer.space) == 2
 
     with pytest.raises(KeyError):
-        optimizer.register(params={"p1": 1, "p2": 2}, target=3)
+        optimizer.register(params={"p1": 1, "p2": 2}, target=3, constraints={"c1": -4, "c2": -3})
     with pytest.raises(KeyError):
-        optimizer.register(params={"p1": 5, "p2": 4}, target=9)
+        optimizer.register(params={"p1": 6, "p2": 4}, target=10, constraints={"c1": 0, "c2": -1})
 
 
 def test_probe_lazy():
-    optimizer = BayesianOptimization(target_func, PBOUNDS, random_state=1)
+    optimizer = BayesianOptimization(target_func, PBOUNDS, cs={"c1": constraint_1, "c2": constraint_2}, random_state=1)
 
     optimizer.probe(params={"p1": 1, "p2": 2}, lazy=True)
     assert len(optimizer.space) == 0
@@ -49,7 +55,7 @@ def test_probe_lazy():
 
 
 def test_probe_eager():
-    optimizer = BayesianOptimization(target_func, PBOUNDS, random_state=1)
+    optimizer = BayesianOptimization(target_func, PBOUNDS, cs={"c1": constraint_1, "c2": constraint_2}, random_state=1)
 
     optimizer.probe(params={"p1": 1, "p2": 2}, lazy=False)
     assert len(optimizer.space) == 1
@@ -69,10 +75,16 @@ def test_probe_eager():
     assert optimizer.max["target"] == 6
     assert optimizer.max["params"] == {"p1": 3, "p2": 3}
 
+    optimizer.probe(params={"p1": 6, "p2": 4}, lazy=False)
+    assert len(optimizer.space) == 3
+    assert len(optimizer._queue) == 0
+    assert optimizer.max["target"] == 6
+    assert optimizer.max["params"] == {"p1": 3, "p2": 3}
+
 
 def test_suggest_at_random():
     util = UtilityFunction(kind="poi", kappa=5, xi=0)
-    optimizer = BayesianOptimization(target_func, PBOUNDS, random_state=1)
+    optimizer = BayesianOptimization(target_func, PBOUNDS, cs={"c1": constraint_1, "c2": constraint_2}, random_state=1)
 
     for _ in range(50):
         sample = optimizer.space.params_to_array(optimizer.suggest(util))
@@ -82,13 +94,24 @@ def test_suggest_at_random():
 
 
 def test_suggest_with_one_observation():
-    util = UtilityFunction(kind="ucb", kappa=5, xi=0)
-    optimizer = BayesianOptimization(target_func, PBOUNDS, random_state=1)
+    util = UtilityFunction(kind="constraint_ei", kappa=5, xi=0)
+    optimizer = BayesianOptimization(target_func, PBOUNDS, cs={"c1": constraint_1, "c2": constraint_2}, random_state=1)
 
-    optimizer.register(params={"p1": 1, "p2": 2}, target=3)
 
+    optimizer.register(params={"p1": 8, "p2": 5}, target=13, constraints={"c1": 3, "c2": 0})
+    optimizer.register(params={"p1": 3, "p2": 7}, target=10, constraints={"c1": -2, "c2": 2})
+    optimizer.register(params={"p1": 3, "p2": 10}, target=13, constraints={"c1": -2, "c2": 5})
+    optimizer.register(params={"p1": 10, "p2": 10}, target=20, constraints={"c1": 5, "c2": 5})
+    optimizer.register(params={"p1": 1, "p2": 2}, target=3, constraints={"c1": -4, "c2": -3})
+    optimizer.register(params={"p1": 2, "p2": 1}, target=3, constraints={"c1": -3, "c2": -4})
+    # print(optimizer.space.params)
+    # print(optimizer.space.unconstrained_target)
+    print(optimizer.space.target)
+    # print(optimizer.space.constriants)
+    # print(optimizer.suggest(util))
     for _ in range(5):
         sample = optimizer.space.params_to_array(optimizer.suggest(util))
+        print(sample)
         assert len(sample) == optimizer.space.dim
         assert all(sample >= optimizer.space.bounds[:, 0])
         assert all(sample <= optimizer.space.bounds[:, 1])
@@ -100,7 +123,7 @@ def test_suggest_with_one_observation():
 
 
 def test_prime_queue_all_empty():
-    optimizer = BayesianOptimization(target_func, PBOUNDS, random_state=1)
+    optimizer = BayesianOptimization(target_func, PBOUNDS, cs={"c1": constraint_1, "c2": constraint_2}, random_state=1)
     assert len(optimizer._queue) == 0
     assert len(optimizer.space) == 0
 
@@ -110,7 +133,7 @@ def test_prime_queue_all_empty():
 
 
 def test_prime_queue_empty_with_init():
-    optimizer = BayesianOptimization(target_func, PBOUNDS, random_state=1)
+    optimizer = BayesianOptimization(target_func, PBOUNDS, cs={"c1": constraint_1, "c2": constraint_2}, random_state=1)
     assert len(optimizer._queue) == 0
     assert len(optimizer.space) == 0
 
@@ -120,29 +143,29 @@ def test_prime_queue_empty_with_init():
 
 
 def test_prime_queue_with_register():
-    optimizer = BayesianOptimization(target_func, PBOUNDS, random_state=1)
+    optimizer = BayesianOptimization(target_func, PBOUNDS, cs={"c1": constraint_1, "c2": constraint_2}, random_state=1)
     assert len(optimizer._queue) == 0
     assert len(optimizer.space) == 0
 
-    optimizer.register(params={"p1": 1, "p2": 2}, target=3)
+    optimizer.register(params={"p1": 1, "p2": 2}, target=3, constraints={"c1": -4, "c2": -3})
     optimizer._prime_queue(init_points=0)
     assert len(optimizer._queue) == 0
     assert len(optimizer.space) == 1
 
 
 def test_prime_queue_with_register_and_init():
-    optimizer = BayesianOptimization(target_func, PBOUNDS, random_state=1)
+    optimizer = BayesianOptimization(target_func, PBOUNDS, cs={"c1": constraint_1, "c2": constraint_2}, random_state=1)
     assert len(optimizer._queue) == 0
     assert len(optimizer.space) == 0
 
-    optimizer.register(params={"p1": 1, "p2": 2}, target=3)
+    optimizer.register(params={"p1": 1, "p2": 2}, target=3, constraints={"c1": -4, "c2": -3})
     optimizer._prime_queue(init_points=3)
     assert len(optimizer._queue) == 3
     assert len(optimizer.space) == 1
 
 
 def test_prime_subscriptions():
-    optimizer = BayesianOptimization(target_func, PBOUNDS, random_state=1)
+    optimizer = BayesianOptimization(target_func, PBOUNDS, cs={"c1": constraint_1, "c2": constraint_2}, random_state=1)
     optimizer._prime_subscriptions()
 
     # Test that the default observer is correctly subscribed
@@ -161,7 +184,7 @@ def test_prime_subscriptions():
     def test_callback(event, instance):
         pass
 
-    optimizer = BayesianOptimization(target_func, PBOUNDS, random_state=1)
+    optimizer = BayesianOptimization(target_func, PBOUNDS, cs={"c1": constraint_1, "c2": constraint_2}, random_state=1)
     optimizer.subscribe(
         event=Events.OPTIMIZATION_START,
         subscriber=test_subscriber,
@@ -202,7 +225,7 @@ def test_set_bounds():
         'p2': (0, 2),
         'p4': (0, 4),
     }
-    optimizer = BayesianOptimization(target_func, pbounds, random_state=1)
+    optimizer = BayesianOptimization(target_func, pbounds, cs={"c1": constraint_1, "c2": constraint_2}, random_state=1)
 
     # Ignore unknown keys
     optimizer.set_bounds({"other": (7, 8)})
@@ -216,7 +239,7 @@ def test_set_bounds():
 
 
 def test_set_gp_params():
-    optimizer = BayesianOptimization(target_func, PBOUNDS, random_state=1)
+    optimizer = BayesianOptimization(target_func, PBOUNDS, cs={"c1": constraint_1, "c2": constraint_2}, random_state=1)
     assert optimizer._gp.alpha == 1e-6
     assert optimizer._gp.n_restarts_optimizer == 5
 
@@ -249,7 +272,7 @@ def test_maximize():
         def reset(self):
             self.__init__()
 
-    optimizer = BayesianOptimization(target_func, PBOUNDS,
+    optimizer = BayesianOptimization(target_func, PBOUNDS, cs={"c1": constraint_1, "c2": constraint_2},
                                      random_state=np.random.RandomState(1))
 
     tracker = Tracker()
@@ -294,7 +317,7 @@ def test_maximize():
 
 def test_define_wrong_transformer():
     with pytest.raises(TypeError):
-        optimizer = BayesianOptimization(target_func, PBOUNDS,
+        optimizer = BayesianOptimization(target_func, PBOUNDS, cs={"c1": constraint_1, "c2": constraint_2},
                                          random_state=np.random.RandomState(1),
                                          bounds_transformer=3)
 
@@ -305,3 +328,4 @@ if __name__ == '__main__':
         python tests/test_bayesian_optimization.py
     """
     pytest.main([__file__])
+    # test_suggest_with_one_observation()
